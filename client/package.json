@@ -8,6 +8,8 @@
     "next": "13.4.0",
     "axios": "^1.4.0",
     "react-hook-form": "^7.45.0",
+    "@hookform/resolvers": "^3.3.4",
+    "zod": "^3.22.4",
     "react-icons": "^4.9.0",
     "tailwindcss": "^3.3.0",
     "framer-motion": "^10.12.0",
