@@ -6,6 +6,7 @@ require('dotenv').config();
 
 // Import routes
 const authRoutes = require('./routes/auth');
+const syncRoutes = require('./routes/sync');
 const portfolioRoutes = require('./routes/portfolio');
 const galleryRoutes = require('./routes/gallery');
 const bundleRoutes = require('./routes/bundles');
@@ -35,6 +36,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // API Routes
+app.use('/api/sync', syncRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/portfolio', portfolioRoutes);
 app.use('/api/gallery', galleryRoutes);
