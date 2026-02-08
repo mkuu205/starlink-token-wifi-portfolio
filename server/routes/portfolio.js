@@ -1,41 +1,71 @@
 const express = require('express');
 const router = express.Router();
 const pool = require('../config/database');
+const firebaseService = require('../services/firebase.service');
+const emailService = require('../services/email.service');
 const { body, validationResult } = require('express-validator');
 
-// Get all portfolio items
-router.get('/', async (req, res) => {
+// Helper function to sync with Firebase
+const syncWithFirebase = async (entityType, action, entityData, user) => {
   try {
-    const result = await pool.query(
-      'SELECT * FROM portfolio_items WHERE is_active = true ORDER BY display_order, created_at DESC'
-    );
-    res.json(result.rows);
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// Get single portfolio item
-router.get('/:id', async (req, res) => {
-  try {
-    const result = await pool.query(
-      'SELECT * FROM portfolio_items WHERE id = $1 AND is_active = true',
-      [req.params.id]
-    );
+    let firebaseId = entityData.firebase_id;
     
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Portfolio item not found' });
+    if (action === 'create' || action === 'update') {
+      // Prepare data for Firebase
+      const firebaseData = {
+        ...entityData,
+        updatedAt: Date.now(),
+        updatedBy: user ? user.email : 'system'
+      };
+      
+      if (action === 'create') {
+        firebaseId = await firebaseService.syncToFirestore(entityType, firebaseData);
+      } else {
+        await firebaseService.syncToFirestore(entityType, { ...firebaseData, firebaseId });
+      }
+      
+      // Broadcast real-time update
+      await firebaseService.broadcastUpdate(entityType, action, {
+        ...firebaseData,
+        firebaseId,
+        syncTimestamp: Date.now()
+      });
+      
+      // Update sync status in database
+      await firebaseService.updateSyncStatus(
+        entityType === 'portfolio_items' ? 'portfolio_items' : entityType,
+        entityData.id,
+        firebaseId
+      );
+      
+      // Send admin notification
+      await emailService.sendAdminUpdateNotification(
+        entityType,
+        action,
+        firebaseData,
+        process.env.ADMIN_NOTIFICATION_EMAIL
+      );
+      
+      return firebaseId;
+    } else if (action === 'delete') {
+      if (firebaseId) {
+        await firebaseService.deleteFromFirebase(entityType, firebaseId);
+        await firebaseService.broadcastUpdate(entityType, 'delete', { firebaseId });
+      }
     }
-    
-    res.json(result.rows[0]);
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Server error' });
+    console.error(`Firebase sync error for ${entityType}:`, error);
+    await firebaseService.updateSyncStatus(
+      entityType === 'portfolio_items' ? 'portfolio_items' : entityType,
+      entityData.id,
+      null,
+      'failed',
+      error.message
+    );
   }
-});
+};
 
-// Create portfolio item (admin only)
+// Create portfolio item with Firebase sync
 router.post('/', [
   body('title').notEmpty().trim(),
   body('description').notEmpty().trim(),
@@ -56,17 +86,32 @@ router.post('/', [
       [title, description, image_url || null, category || null, display_order || 0]
     );
     
-    res.status(201).json(result.rows[0]);
+    const portfolioItem = result.rows[0];
+    
+    // Sync with Firebase in background
+    syncWithFirebase('portfolio_items', 'create', portfolioItem, req.user);
+    
+    res.status(201).json(portfolioItem);
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-// Update portfolio item (admin only)
+// Update portfolio item with Firebase sync
 router.put('/:id', async (req, res) => {
   try {
     const { title, description, image_url, category, display_order, is_active } = req.body;
+    
+    // First get current data
+    const currentResult = await pool.query(
+      'SELECT * FROM portfolio_items WHERE id = $1',
+      [req.params.id]
+    );
+    
+    if (currentResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Portfolio item not found' });
+    }
     
     const result = await pool.query(
       `UPDATE portfolio_items 
@@ -82,28 +127,41 @@ router.put('/:id', async (req, res) => {
       [title, description, image_url, category, display_order, is_active, req.params.id]
     );
     
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Portfolio item not found' });
-    }
+    const updatedItem = result.rows[0];
     
-    res.json(result.rows[0]);
+    // Sync with Firebase in background
+    syncWithFirebase('portfolio_items', 'update', updatedItem, req.user);
+    
+    res.json(updatedItem);
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-// Delete portfolio item (admin only)
+// Delete portfolio item with Firebase sync
 router.delete('/:id', async (req, res) => {
   try {
+    // First get the item to be deleted
+    const itemResult = await pool.query(
+      'SELECT * FROM portfolio_items WHERE id = $1',
+      [req.params.id]
+    );
+    
+    if (itemResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Portfolio item not found' });
+    }
+    
+    const item = itemResult.rows[0];
+    
+    // Delete from database
     const result = await pool.query(
       'DELETE FROM portfolio_items WHERE id = $1 RETURNING *',
       [req.params.id]
     );
     
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Portfolio item not found' });
-    }
+    // Sync with Firebase in background
+    syncWithFirebase('portfolio_items', 'delete', item, req.user);
     
     res.json({ message: 'Portfolio item deleted successfully' });
   } catch (error) {
@@ -111,5 +169,3 @@ router.delete('/:id', async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 });
-
-module.exports = router;
